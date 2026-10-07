@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-warm: #F7F5F0;
+    --paper: #FBF9F5;
+    --ink: #0E0F12;
+    --muted: #6E7079;
+    --hairline: rgba(14, 15, 18, 0.12);
+  }
+
+  body {
+    background-color: var(--bg-warm);
+    color: var(--ink);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Custom subtle editorial scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #F7F5F0;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #D5D1C8;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #9D9990;
+  }
+}
+
+@layer utilities {
+  .editorial-border {
+    border-color: rgba(14, 15, 18, 0.12);
+  }
+  .editorial-border-dark {
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  .bg-noise {
+    background-image: radial-gradient(rgba(14, 15, 18, 0.04) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .bg-grid-tech {
+    background-image: 
+      linear-gradient(to right, rgba(14, 15, 18, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(14, 15, 18, 0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .bg-grid-tech-dark {
+    background-image: 
+      linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+}
+
+/* Subtle pulse for live status dot */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.92); }
+}
+
+.animate-status {
+  animation: status-pulse 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Computer vision scanning line */
+@keyframes scan-line {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+.animate-scan {
+  animation: scan-line 4s linear infinite;
+}
