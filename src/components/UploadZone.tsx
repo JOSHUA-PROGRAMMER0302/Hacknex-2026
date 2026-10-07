@@ -1,8 +1,10 @@
 import { useState, useRef } from 'react';
-import { UploadCloud, CheckCircle2, Loader2 } from 'lucide-react';
+import { UploadCloud, CheckCircle2, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import { safeWatchApi } from '../services/api';
 import { DEMO_REFERENCE_ANALYSIS } from '../services/demoData';
 import type { VideoAnalysisResult, PipelineConfig } from '../types';
+
+export type FlowState = 'IDLE' | 'VIDEO_SELECTED' | 'UPLOADING' | 'UPLOADED' | 'ANALYZING' | 'ANALYSIS_COMPLETE' | 'ERROR';
 
 interface UploadZoneProps {
   onAnalysisComplete: (result: VideoAnalysisResult) => void;
@@ -10,41 +12,71 @@ interface UploadZoneProps {
 }
 
 export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, config }) => {
+  const [flowState, setFlowState] = useState<FlowState>('IDLE');
   const [isDragging, setIsDragging] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [progressPct, setProgressPct] = useState(0);
   const [activeStage, setActiveStage] = useState(0);
   const [currentStageName, setCurrentStageName] = useState<string>("Initializing pipeline...");
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [frameProgressInfo, setFrameProgressInfo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const stages = [
-    { label: 'Object detection', desc: 'Locating human subjects and machinery via YOLO' },
-    { label: 'Multi-object tracking', desc: 'ByteTrack persistent ID association across frames' },
-    { label: 'Movement analysis', desc: 'Calculating velocity vectors and trajectory distance' },
-    { label: 'Behavior recognition', desc: 'Evaluating stationary dwell and polygon boundaries' },
-    { label: 'Event detection', desc: 'Generating structured timestamped anomaly logs' }
+    { label: 'Video Upload & Metadata', desc: 'Uploading video and extracting resolution, FPS, and frame count' },
+    { label: 'Object Detection', desc: 'Running YOLOv8 inference on video frames to locate personnel' },
+    { label: 'Multi-Object Tracking', desc: 'ByteTrack persistent ID association across sequential frames' },
+    { label: 'Spatial-Temporal Engine', desc: 'Computing velocity, trajectories, and dwell durations' },
+    { label: 'Rule Evaluation & Events', desc: 'Detecting stationary dwell, restricted zone breaches, and falls' }
   ];
 
   const handleFile = async (file: File) => {
     setUploadedFileName(file.name);
-    setIsProcessing(true);
-    setProgressPct(0);
+    setFlowState('VIDEO_SELECTED');
+    setErrorMessage(null);
+    setProgressPct(5);
     setActiveStage(0);
-    setCurrentStageName("Uploading and extracting video frames...");
+    setCurrentStageName("Connecting to SafeWatch CV backend...");
 
     try {
-      const result = await safeWatchApi.analyzeVideo(file, config, (pct, stageName) => {
+      // Transition to UPLOADING / ANALYZING
+      setFlowState('UPLOADING');
+      const result = await safeWatchApi.analyzeVideo(file, config, (pct, stageName, meta) => {
         setProgressPct(pct);
         setCurrentStageName(stageName);
-        const stageIdx = Math.min(4, Math.floor((pct / 100) * 5));
-        setActiveStage(stageIdx);
+
+        if (pct < 15) {
+          setFlowState('UPLOADING');
+          setActiveStage(0);
+        } else if (pct < 35) {
+          setFlowState('ANALYZING');
+          setActiveStage(1);
+        } else if (pct < 65) {
+          setFlowState('ANALYZING');
+          setActiveStage(2);
+        } else if (pct < 90) {
+          setFlowState('ANALYZING');
+          setActiveStage(3);
+        } else {
+          setActiveStage(4);
+        }
+
+        if (meta?.framesProcessed && meta?.totalFrames) {
+          setFrameProgressInfo(`${meta.framesProcessed} / ${meta.totalFrames} frames`);
+        }
       });
-      setIsProcessing(false);
+
+      setFlowState('ANALYSIS_COMPLETE');
       onAnalysisComplete(result);
-    } catch (err) {
-      console.error(err);
-      setIsProcessing(false);
+    } catch (err: any) {
+      console.error("[SafeWatch] Analysis failed:", err);
+      setFlowState('ERROR');
+      const msg = err?.message || "Computer vision analysis failed.";
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("CV backend unavailable")) {
+        setErrorMessage("CV backend unavailable. Start FastAPI on port 8000.");
+      } else {
+        setErrorMessage(msg);
+      }
     }
   };
 
@@ -67,11 +99,11 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
 
   const handleSelectDemoVideo = async () => {
     setUploadedFileName("DEMO_WHSE_BAY04_REFERENCE.mp4");
-    setIsProcessing(true);
+    setFlowState('ANALYZING');
+    setErrorMessage(null);
     setProgressPct(10);
     setActiveStage(0);
 
-    // Simulate genuine progress for demo mode loading
     const steps = [
       { pct: 25, name: "Loading precomputed inference from warehouse CCTV...", stage: 1 },
       { pct: 55, name: "Synchronizing ByteTrack IDs and trajectory paths...", stage: 2 },
@@ -80,14 +112,25 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
     ];
 
     for (const step of steps) {
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 250));
       setProgressPct(step.pct);
       setCurrentStageName(step.name);
       setActiveStage(step.stage);
     }
 
-    setIsProcessing(false);
+    setFlowState('ANALYSIS_COMPLETE');
     onAnalysisComplete(DEMO_REFERENCE_ANALYSIS);
+  };
+
+  const resetUpload = () => {
+    setFlowState('IDLE');
+    setErrorMessage(null);
+    setProgressPct(0);
+    setActiveStage(0);
+    setFrameProgressInfo(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   };
 
   return (
@@ -111,7 +154,49 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
 
         {/* Upload Container */}
         <div className="max-w-4xl mx-auto">
-          {!isProcessing ? (
+          {flowState === 'ERROR' ? (
+            /* ERROR STATE CARD */
+            <div className="p-10 sm:p-14 border-2 border-red-500 bg-paper shadow-xl">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center text-red-600 shrink-0">
+                  <AlertCircle className="w-6 h-6 stroke-[2]" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-mono uppercase tracking-widest text-red-600 font-semibold block mb-1">
+                    PIPELINE ERROR
+                  </span>
+                  <h3 className="font-display text-2xl sm:text-3xl text-ink-900 font-normal">
+                    ANALYSIS FAILED
+                  </h3>
+                  <p className="text-sm font-mono text-red-600 mt-2 p-3 bg-red-50 border border-red-200">
+                    {errorMessage || "CV backend unavailable. Start FastAPI on port 8000."}
+                  </p>
+                  <p className="text-xs font-sans text-ink-500 mt-2">
+                    Ensure FastAPI is running: <code className="bg-ink-100 px-1 py-0.5 font-mono text-ink-800">uvicorn main:app --port 8000</code> in the backend directory.
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-6 border-t border-ink-900/10 flex items-center gap-4">
+                <button
+                  type="button"
+                  onClick={resetUpload}
+                  className="px-6 py-3 bg-ink-900 text-paper font-mono text-xs uppercase tracking-widest hover:bg-ink-800 transition-all flex items-center gap-2"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>TRY AGAIN</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={resetUpload}
+                  className="px-6 py-3 bg-background border border-ink-900/30 text-ink-900 font-mono text-xs uppercase tracking-widest hover:border-ink-900 transition-all"
+                >
+                  CHOOSE ANOTHER VIDEO
+                </button>
+              </div>
+            </div>
+          ) : flowState === 'IDLE' ? (
+            /* IDLE STATE: DROP ZONE */
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
@@ -142,7 +227,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
               <h3 className="font-display text-2xl sm:text-3xl text-ink-900 font-normal mb-3">
                 Drop your warehouse or workplace video here.
               </h3>
-              
+
               <p className="text-xs sm:text-sm font-mono text-ink-500 max-w-md mx-auto mb-8">
                 SUPPORTS MP4, WEBM, MOV · REAL COMPUTER VISION PIPELINE
               </p>
@@ -173,32 +258,35 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
 
               {/* Minimal Footnote */}
               <div className="mt-8 text-[11px] font-mono text-ink-400">
-                🔒 Every detection, track ID, and event is dynamically generated from actual frames.
+                🔒 Every detection, track ID, and event is dynamically generated from actual frames by the FastAPI CV backend.
               </div>
             </div>
           ) : (
-            /* Processing State Card */
+            /* PROCESSING / ANALYZING STATE CARD */
             <div className="p-10 sm:p-14 border border-ink-900 bg-paper shadow-xl">
               <div className="flex items-center justify-between pb-6 border-b border-ink-900/15 mb-8">
                 <div>
                   <span className="text-[11px] font-mono uppercase tracking-widest text-ink-500 block mb-1">
-                    INFERENCE PIPELINE ACTIVE
+                    {flowState === 'UPLOADING' ? 'UPLOADING VIDEO' : 'FASTAPI CV PIPELINE ACTIVE'}
                   </span>
                   <h3 className="font-display text-2xl sm:text-3xl text-ink-900 font-normal">
-                    PROCESSING VIDEO...
+                    {flowState === 'UPLOADING' ? 'SENDING TO SERVER...' : 'ANALYZING FRAMES...'}
                   </h3>
                   <p className="text-xs font-mono text-ink-600 mt-1">
                     {currentStageName}
+                    {frameProgressInfo ? ` · ${frameProgressInfo}` : ''}
                   </p>
                 </div>
                 <div className="text-right">
                   <span className="font-mono text-2xl font-bold text-ink-900">{progressPct}%</span>
-                  <span className="text-[10px] font-mono text-ink-400 block">COMPUTING</span>
+                  <span className="text-[10px] font-mono text-ink-400 block">
+                    {flowState === 'UPLOADING' ? 'UPLOADING' : 'COMPUTING'}
+                  </span>
                 </div>
               </div>
 
               {/* Progress bar */}
-              <div className="w-full bg-ink-900/10 h-1 mb-8 overflow-hidden">
+              <div className="w-full bg-ink-900/10 h-1.5 mb-8 overflow-hidden rounded-full">
                 <div
                   className="bg-ink-900 h-full transition-all duration-300"
                   style={{ width: `${progressPct}%` }}
@@ -224,7 +312,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
                     >
                       <div className="flex items-center gap-3">
                         {isDone ? (
-                          <CheckCircle2 className="w-4 h-4 text-safety-safe" />
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                         ) : isCurrent ? (
                           <Loader2 className="w-4 h-4 text-ink-900 animate-spin" />
                         ) : (
@@ -254,7 +342,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onAnalysisComplete, conf
 
               <div className="mt-8 pt-4 border-t border-ink-900/10 flex items-center justify-between text-[11px] font-mono text-ink-500">
                 <span>PARSING: {uploadedFileName || 'STREAM.mp4'}</span>
-                <span>YOLO DETECTOR + BYTETRACK TEMPORAL ENGINE</span>
+                <span>YOLOv8 + BYTETRACK TEMPORAL ENGINE</span>
               </div>
             </div>
           )}

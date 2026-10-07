@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import type { FrameRecord, FrameTrack, AnomalyEvent, PipelineConfig } from '../types';
+import type { FrameRecord, FrameTrack, AnomalyEvent, PipelineConfig, VideoAnalysisResult } from '../types';
 
 interface WarehouseCctvPlayerProps {
   videoUrl?: string;
@@ -7,6 +7,7 @@ interface WarehouseCctvPlayerProps {
   isPlaying: boolean;
   onTimeUpdate: (time: number) => void;
   frames?: FrameRecord[];
+  metadata?: VideoAnalysisResult['metadata'];
   selectedTrackId?: number | null;
   selectedEvent?: AnomalyEvent | null;
   onSelectTrack?: (id: number) => void;
@@ -21,12 +22,13 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
   isPlaying,
   onTimeUpdate,
   frames = [],
+  metadata,
   selectedTrackId,
   selectedEvent,
   onSelectTrack,
   config = {
-    personConfidenceThreshold: 0.40,
-    stationaryTimeThreshold: 10.0,
+    personConfidenceThreshold: 0.35,
+    stationaryTimeThreshold: 3.0,
     stationaryDistThreshold: 25.0,
     restrictedPolygon: [
       [480, 260],
@@ -45,7 +47,7 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
 
   timeRef.current = currentTime;
 
-  // Sync HTML5 video element
+  // Sync HTML5 video playback
   useEffect(() => {
     if (videoUrl && videoRef.current) {
       if (isPlaying) {
@@ -59,7 +61,7 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
   // Sync seek timestamp
   useEffect(() => {
     if (videoUrl && videoRef.current) {
-      if (Math.abs(videoRef.current.currentTime - currentTime) > 0.4) {
+      if (Math.abs(videoRef.current.currentTime - currentTime) > 0.3) {
         videoRef.current.currentTime = currentTime;
       }
     }
@@ -79,7 +81,7 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
       lastTimestamp = now;
 
       if (isPlaying && (!videoUrl || (videoRef.current && videoRef.current.paused))) {
-        const nextTime = (timeRef.current + dt) % 45;
+        const nextTime = (timeRef.current + dt) % (metadata?.duration || 45);
         onTimeUpdate(nextTime);
       }
 
@@ -87,17 +89,33 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
       const w = canvas.width;
       const h = canvas.height;
 
+      // Actual resolution of video for relative coordinate transformations
+      const sourceWidth = (videoRef.current?.videoWidth && videoRef.current.videoWidth > 0)
+        ? videoRef.current.videoWidth
+        : (metadata?.width || 1280);
+      const sourceHeight = (videoRef.current?.videoHeight && videoRef.current.videoHeight > 0)
+        ? videoRef.current.videoHeight
+        : (metadata?.height || 720);
+
       ctx.clearRect(0, 0, w, h);
 
       // 1. Draw Video or CCTV background
+      let videoDrawn = false;
       if (videoUrl && videoRef.current && videoRef.current.readyState >= 2) {
-        ctx.drawImage(videoRef.current, 0, 0, w, h);
-      } else {
+        try {
+          ctx.drawImage(videoRef.current, 0, 0, w, h);
+          videoDrawn = true;
+        } catch {
+          // Fallback if crossOrigin issue
+          drawFallbackIndustrialFeed(ctx, w, h, t);
+        }
+      }
+      if (!videoDrawn) {
         drawFallbackIndustrialFeed(ctx, w, h, t);
       }
 
-      // 2. Draw Configured Restricted Zone Polygon
-      drawRestrictedPolygon(ctx, w, h, config.restrictedPolygon);
+      // 2. Draw Configured Restricted Zone Polygon (scaled to video dimensions)
+      drawRestrictedPolygon(ctx, w, h, sourceWidth, sourceHeight, config.restrictedPolygon);
 
       // 3. Find matching frame record for the current timestamp
       let matchedFrame: FrameRecord | null = null;
@@ -119,19 +137,21 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
               ctx,
               w,
               h,
+              sourceWidth,
+              sourceHeight,
               trk,
               Boolean(selectedTrackId === trk.track_id || (selectedEvent && selectedEvent.track_id === trk.track_id))
             );
           }
         });
       } else if (isDemo) {
-        // Fallback demo overlay if no frames generated
+        // Fallback demo overlay if demo mode and no frames generated
         drawSyntheticDemoOverlay(ctx, w, h, t, selectedTrackId);
       } else {
-        // Prompt requirement: "If YOLO cannot detect a person: 'No person detected in this frame.'"
+        // SafeWatch AI Prompt requirement: "If YOLO cannot detect a person: 'No person detected in this frame.'"
         ctx.save();
         ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-        ctx.fillRect(w / 2 - 130, h - 50, 260, 24);
+        ctx.fillRect(w / 2 - 140, h - 50, 280, 24);
         ctx.font = '11px "JetBrains Mono", monospace';
         ctx.fillStyle = '#E5E7EB';
         ctx.textAlign = 'center';
@@ -140,11 +160,11 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
       }
 
       // 5. Draw CCTV Telemetry & Timestamp HUD
-      drawCctvHud(ctx, w, h, t, Boolean(isDemo));
+      drawCctvHud(ctx, w, h, t, Boolean(isDemo), metadata?.fps || 25.0);
 
       // 6. Draw Debug Mode Panel if enabled
       if (config.debugMode) {
-        drawDebugOverlay(ctx, t, matchedFrame, renderedDetsCount, renderedTracksCount);
+        drawDebugOverlay(ctx, t, matchedFrame, renderedDetsCount, renderedTracksCount, metadata?.fps || 25.0);
       }
 
       animationFrameRef.current = requestAnimationFrame(render);
@@ -157,7 +177,7 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [isPlaying, videoUrl, frames, selectedTrackId, selectedEvent, config, isDemo]);
+  }, [isPlaying, videoUrl, frames, metadata, selectedTrackId, selectedEvent, config, isDemo]);
 
   // Resize canvas to match display container
   useEffect(() => {
@@ -179,6 +199,7 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
         <video
           ref={videoRef}
           src={videoUrl}
+          crossOrigin="anonymous"
           className="hidden"
           playsInline
           muted
@@ -202,14 +223,20 @@ export const WarehouseCctvPlayer: React.FC<WarehouseCctvPlayerProps> = ({
           const scaleY = canvas.height / rect.height;
           const clickX = (e.clientX - rect.left) * scaleX;
           const clickY = (e.clientY - rect.top) * scaleY;
-          
+
+          const sourceWidth = (videoRef.current?.videoWidth && videoRef.current.videoWidth > 0)
+            ? videoRef.current.videoWidth
+            : (metadata?.width || 1280);
+          const sourceHeight = (videoRef.current?.videoHeight && videoRef.current.videoHeight > 0)
+            ? videoRef.current.videoHeight
+            : (metadata?.height || 720);
+
           const frame = findClosestFrame(frames, timeRef.current);
           if (frame && frame.tracks) {
             for (const trk of frame.tracks) {
               const [x1, y1, x2, y2] = trk.bbox;
-              // Normalize if stored in source resolution
-              const sx = canvas.width / 1280;
-              const sy = canvas.height / 720;
+              const sx = canvas.width / sourceWidth;
+              const sy = canvas.height / sourceHeight;
               const rx1 = x1 * sx;
               const ry1 = y1 * sy;
               const rx2 = x2 * sx;
@@ -243,8 +270,8 @@ function findClosestFrame(frames: FrameRecord[], timestamp: number): FrameRecord
     }
   }
 
-  // Only match if within 0.75 seconds
-  return minDiff <= 0.75 ? closest : null;
+  // Allow closest match within 1.5 seconds window for steady tracking visualization
+  return minDiff <= 1.5 ? closest : null;
 }
 
 /* --------------------------------------------------------------------------
@@ -254,14 +281,16 @@ function drawRealTrackOverlay(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
+  sourceWidth: number,
+  sourceHeight: number,
   trk: FrameTrack,
   isSelected: boolean
 ) {
   const [x1, y1, x2, y2] = trk.bbox;
 
-  // Scale coordinates to current canvas resolution (assuming 1280x720 base)
-  const sx = w / 1280;
-  const sy = h / 720;
+  // Relative coordinate transformation based on video dimensions
+  const sx = w / sourceWidth;
+  const sy = h / sourceHeight;
   const bx = x1 * sx;
   const by = y1 * sy;
   const bw = (x2 - x1) * sx;
@@ -345,12 +374,14 @@ function drawRestrictedPolygon(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
+  sourceWidth: number,
+  sourceHeight: number,
   polygon: [number, number][]
 ) {
   if (!polygon || polygon.length < 3) return;
 
-  const sx = w / 1280;
-  const sy = h / 720;
+  const sx = w / sourceWidth;
+  const sy = h / sourceHeight;
 
   ctx.save();
   ctx.beginPath();
@@ -381,14 +412,15 @@ function drawRestrictedPolygon(
 }
 
 /* --------------------------------------------------------------------------
-   Draw Debug Mode Panel (Requirement #11)
+   Draw Debug Mode Panel
 -------------------------------------------------------------------------- */
 function drawDebugOverlay(
   ctx: CanvasRenderingContext2D,
   currentTime: number,
   frame: FrameRecord | null,
   detectionsCount: number,
-  tracksCount: number
+  tracksCount: number,
+  fps: number
 ) {
   ctx.save();
   const px = 18;
@@ -412,13 +444,13 @@ function drawDebugOverlay(
   const sec = Math.floor(currentTime % 60).toString().padStart(2, '0');
   const ms = Math.floor((currentTime % 1) * 100).toString().padStart(2, '0');
 
-  ctx.fillText(`FRAME:           ${frame ? frame.frame_number : Math.round(currentTime * 29.97)}`, px + 10, py + 36);
+  ctx.fillText(`FRAME:           ${frame ? frame.frame_number : Math.round(currentTime * fps)}`, px + 10, py + 36);
   ctx.fillText(`TIME:            00:${sec}.${ms}`, px + 10, py + 52);
-  ctx.fillText(`FPS:             28.69`, px + 10, py + 68);
+  ctx.fillText(`FPS:             ${fps}`, px + 10, py + 68);
   ctx.fillText(`DETECTIONS:      ${detectionsCount}`, px + 10, py + 84);
   ctx.fillText(`TRACKS:          ${tracksCount}`, px + 10, py + 100);
-  ctx.fillText(`INFERENCE:       42ms`, px + 10, py + 116);
-  ctx.fillText(`BEHAVIOR ENGINE: 8ms`, px + 10, py + 132);
+  ctx.fillText(`INFERENCE:       YOLOv8 + ByteTrack`, px + 10, py + 116);
+  ctx.fillText(`BEHAVIOR ENGINE: Spatial Temporal`, px + 10, py + 132);
 
   ctx.restore();
 }
@@ -429,9 +461,10 @@ function drawDebugOverlay(
 function drawCctvHud(
   ctx: CanvasRenderingContext2D,
   w: number,
-  h: number,
+  _h: number,
   t: number,
-  isDemo: boolean
+  isDemo: boolean,
+  _fps: number
 ) {
   ctx.save();
   ctx.font = '10px "JetBrains Mono", monospace';
@@ -448,35 +481,53 @@ function drawCctvHud(
 
   ctx.fillStyle = '#D9381E';
   ctx.fillText('● REC', w - 210, 26);
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-  ctx.fillText(timecode, w - 160, 26);
 
-  // Bottom Center: Engine status
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
-  ctx.font = '9px "JetBrains Mono", monospace';
-  ctx.fillText('SAFEWATCH AI // SPATIAL-TEMPORAL BEHAVIOR ENGINE // REAL-TIME SYNC', 18, h - 14);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+  ctx.fillText(timecode, w - 170, 26);
 
   ctx.restore();
 }
 
-function drawFallbackIndustrialFeed(ctx: CanvasRenderingContext2D, w: number, h: number, _t: number) {
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, '#13151A');
-  grad.addColorStop(1, '#1A1D24');
-  ctx.fillStyle = grad;
+/* --------------------------------------------------------------------------
+   Industrial Background Fallback Grid
+-------------------------------------------------------------------------- */
+function drawFallbackIndustrialFeed(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  t: number
+) {
+  // Industrial concrete floor tint
+  ctx.fillStyle = '#0F1116';
   ctx.fillRect(0, 0, w, h);
 
-  // Grid lines
+  // Perspective floor grid lines
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
   ctx.lineWidth = 1;
-  for (let x = 0; x < w; x += 40) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+
+  for (let x = 0; x < w; x += 60) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
   }
-  for (let y = 0; y < h; y += 40) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+
+  for (let y = 0; y < h; y += 45) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
   }
+
+  // Scanning scanline
+  const scanY = (t * 80) % h;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.02)';
+  ctx.fillRect(0, scanY, w, 2);
 }
 
+/* --------------------------------------------------------------------------
+   Synthetic Demo Overlay (Only for initial showcase demo, never uploaded video)
+-------------------------------------------------------------------------- */
 function drawSyntheticDemoOverlay(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -484,22 +535,38 @@ function drawSyntheticDemoOverlay(
   t: number,
   selectedTrackId?: number | null
 ) {
-  // Demo visualization for initial hero before user uploads
-  const dummyTrack: FrameTrack = {
+  const sx = w / 1280;
+  const sy = h / 720;
+
+  // Person 1: Walking
+  const x1 = (320 + Math.sin(t * 0.8) * 120) * sx;
+  const y1 = 340 * sy;
+  drawRealTrackOverlay(ctx, w, h, 1280, 720, {
     track_id: 1,
-    label: "Worker #1",
-    class: "person",
+    label: '#01',
+    class: 'person',
     confidence: 0.94,
-    bbox: [280, 220, 360, 480],
-    center: [320, 350],
+    bbox: [x1 / sx, y1 / sy, (x1 + 60) / sx, (y1 + 130) / sy],
+    center: [(x1 + 30) / sx, (y1 + 65) / sy],
     velocity: 1.2,
-    behavior: t >= 10 ? "STATIONARY" : "WALKING",
+    behavior: 'WALKING',
     in_restricted_zone: false,
-    trajectory: [
-      { x: 260, y: 350, t: 0 },
-      { x: 290, y: 350, t: 5 },
-      { x: 320, y: 350, t: 10 }
-    ]
-  };
-  drawRealTrackOverlay(ctx, w, h, dummyTrack, selectedTrackId === 1);
+    trajectory: []
+  }, selectedTrackId === 1);
+
+  // Person 2: In Zone
+  const x2 = 560 * sx;
+  const y2 = 310 * sy;
+  drawRealTrackOverlay(ctx, w, h, 1280, 720, {
+    track_id: 2,
+    label: '#02',
+    class: 'person',
+    confidence: 0.91,
+    bbox: [x2 / sx, y2 / sy, (x2 + 55) / sx, (y2 + 125) / sy],
+    center: [(x2 + 27) / sx, (y2 + 62) / sy],
+    velocity: 0.8,
+    behavior: 'ENTERED RESTRICTED ZONE',
+    in_restricted_zone: true,
+    trajectory: []
+  }, selectedTrackId === 2);
 }

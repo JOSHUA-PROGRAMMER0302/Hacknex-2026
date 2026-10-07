@@ -2,6 +2,7 @@ import os
 import uuid
 import shutil
 import json
+import asyncio
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,9 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+
+# Configurable API base URL (defaults to localhost:8000 for local development)
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 # Mount uploads directory for static video playback
 app.mount("/videos", StaticFiles(directory=UPLOAD_DIR), name="videos")
@@ -83,11 +87,13 @@ async def upload_video(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read video file: {str(e)}")
 
+    video_url = f"{API_BASE_URL}/videos/{saved_filename}"
+
     ANALYSIS_JOBS[file_id] = {
         "analysis_id": file_id,
         "filename": file.filename,
         "saved_path": saved_path,
-        "video_url": f"http://127.0.0.1:8000/videos/{saved_filename}",
+        "video_url": video_url,
         "status": "uploaded",
         "metadata": meta,
         "frames_processed": 0,
@@ -102,61 +108,12 @@ async def upload_video(file: UploadFile = File(...)):
         "duration": meta["duration"],
         "width": meta["width"],
         "height": meta["height"],
-        "video_url": f"http://127.0.0.1:8000/videos/{saved_filename}"
+        "video_url": video_url
     }
 
 # ========================================================
 # PHASE 2 & 3 & 6 & 7 & 8: COMPUTER VISION INFERENCE
 # ========================================================
-def run_pipeline_task(
-    analysis_id: str,
-    video_path: str,
-    original_name: str,
-    conf_thresh: float,
-    stat_thresh: float,
-    polygon: Optional[List[List[float]]]
-):
-    def on_progress(pct: int, current_ts: float, processed_cnt: int, total_cnt: int):
-        if analysis_id in ANALYSIS_JOBS:
-            ANALYSIS_JOBS[analysis_id].update({
-                "status": "processing",
-                "percentage": pct,
-                "current_timestamp": current_ts,
-                "frames_processed": processed_cnt,
-                "total_frames": total_cnt
-            })
-
-    try:
-        ANALYSIS_JOBS[analysis_id]["status"] = "processing"
-        pipeline = VideoAnalysisPipeline(
-            person_conf_threshold=conf_thresh,
-            stationary_time_threshold=stat_thresh,
-            restricted_polygon=polygon
-        )
-        results = pipeline.process_video(video_path, progress_callback=on_progress)
-        results["analysis_id"] = analysis_id
-        results["video_name"] = original_name
-        results["video_url"] = f"http://127.0.0.1:8000/videos/{os.path.basename(video_path)}"
-
-        ANALYSIS_STORE[analysis_id] = results
-        ANALYSIS_JOBS[analysis_id].update({
-            "status": "completed",
-            "percentage": 100,
-            "results": results
-        })
-
-        # Save results to disk
-        out_file = os.path.join(RESULTS_DIR, f"{analysis_id}.json")
-        with open(out_file, "w") as f:
-            json.dump(results, f, indent=2)
-
-    except Exception as e:
-        print(f"[SafeWatch CV Error] Pipeline failure on {analysis_id}: {e}")
-        ANALYSIS_JOBS[analysis_id].update({
-            "status": "failed",
-            "error": str(e)
-        })
-
 @app.post("/api/videos/{analysis_id}/analyze")
 @app.post("/api/analyze")
 async def start_analysis(
@@ -193,7 +150,7 @@ async def start_analysis(
             "analysis_id": vid_id,
             "filename": file.filename,
             "saved_path": saved_path,
-            "video_url": f"http://127.0.0.1:8000/videos/{saved_filename}",
+            "video_url": f"{API_BASE_URL}/videos/{saved_filename}",
             "status": "processing",
             "metadata": meta,
             "frames_processed": 0,
@@ -216,29 +173,72 @@ async def start_analysis(
                 break
         if not target_path:
             raise HTTPException(status_code=404, detail="Video not found")
+        ANALYSIS_JOBS[vid_id] = {
+            "analysis_id": vid_id,
+            "filename": orig_name,
+            "saved_path": target_path,
+            "video_url": f"{API_BASE_URL}/videos/{os.path.basename(target_path)}",
+            "status": "processing",
+            "frames_processed": 0,
+            "total_frames": 0,
+            "percentage": 0
+        }
     else:
         raise HTTPException(status_code=400, detail="Must provide video file or video_id")
 
-    # Run analysis synchronously or return job ID
     pipeline = VideoAnalysisPipeline(
         person_conf_threshold=confidence_threshold,
         stationary_time_threshold=stationary_threshold,
         restricted_polygon=poly
     )
 
+    def on_progress(pct: int, current_ts: float, processed_cnt: int, total_cnt: int):
+        if vid_id in ANALYSIS_JOBS:
+            ANALYSIS_JOBS[vid_id].update({
+                "status": "processing",
+                "percentage": pct,
+                "current_timestamp": current_ts,
+                "frames_processed": processed_cnt,
+                "total_frames": total_cnt
+            })
+
+    if vid_id in ANALYSIS_JOBS:
+        ANALYSIS_JOBS[vid_id]["status"] = "processing"
+
     try:
-        results = pipeline.process_video(target_path)
+        # Run CPU-intensive computer vision pipeline in worker thread to prevent event loop blocking
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(
+            None,
+            lambda: pipeline.process_video(target_path, progress_callback=on_progress)
+        )
+
         results["analysis_id"] = vid_id
         results["video_name"] = orig_name
-        results["video_url"] = f"http://127.0.0.1:8000/videos/{os.path.basename(target_path)}"
+        results["video_url"] = f"{API_BASE_URL}/videos/{os.path.basename(target_path)}"
 
         ANALYSIS_STORE[vid_id] = results
         if vid_id in ANALYSIS_JOBS:
-            ANALYSIS_JOBS[vid_id]["status"] = "completed"
-            ANALYSIS_JOBS[vid_id]["percentage"] = 100
+            ANALYSIS_JOBS[vid_id].update({
+                "status": "completed",
+                "percentage": 100,
+                "frames_processed": results["metadata"]["processed_frames"],
+                "total_frames": results["metadata"]["total_frames"],
+                "results": results
+            })
+
+        # Save results to disk
+        out_file = os.path.join(RESULTS_DIR, f"{vid_id}.json")
+        with open(out_file, "w") as f:
+            json.dump(results, f, indent=2)
 
         return results
     except Exception as e:
+        if vid_id in ANALYSIS_JOBS:
+            ANALYSIS_JOBS[vid_id].update({
+                "status": "failed",
+                "error": str(e)
+            })
         raise HTTPException(status_code=500, detail=f"ANALYSIS FAILED: {str(e)}")
 
 # ========================================================
@@ -261,9 +261,24 @@ def get_analysis_status(analysis_id: str):
             "analysis_id": analysis_id,
             "status": "completed",
             "percentage": 100,
-            "frames_processed": ANALYSIS_STORE[analysis_id]["metadata"]["processed_frames"],
-            "total_frames": ANALYSIS_STORE[analysis_id]["metadata"]["total_frames"]
+            "frames_processed": ANALYSIS_STORE[analysis_id]["metadata"].get("processed_frames", 0),
+            "total_frames": ANALYSIS_STORE[analysis_id]["metadata"].get("total_frames", 0)
         }
+
+    # Check saved result on disk
+    res_path = os.path.join(RESULTS_DIR, f"{analysis_id}.json")
+    if os.path.exists(res_path):
+        with open(res_path, "r") as f:
+            data = json.load(f)
+            ANALYSIS_STORE[analysis_id] = data
+            return {
+                "analysis_id": analysis_id,
+                "status": "completed",
+                "percentage": 100,
+                "frames_processed": data["metadata"].get("processed_frames", 0),
+                "total_frames": data["metadata"].get("total_frames", 0)
+            }
+
     raise HTTPException(status_code=404, detail="Analysis job not found")
 
 @app.get("/api/videos/{analysis_id}/results")
@@ -286,7 +301,12 @@ def get_analysis_results(analysis_id: str):
 @app.get("/api/analysis/{analysis_id}/frame")
 def get_closest_frame(analysis_id: str, time: float = 0.0):
     if analysis_id not in ANALYSIS_STORE:
-        raise HTTPException(status_code=404, detail="Analysis not found")
+        res_path = os.path.join(RESULTS_DIR, f"{analysis_id}.json")
+        if os.path.exists(res_path):
+            with open(res_path, "r") as f:
+                ANALYSIS_STORE[analysis_id] = json.load(f)
+        else:
+            raise HTTPException(status_code=404, detail="Analysis not found")
 
     frames = ANALYSIS_STORE[analysis_id].get("frames", [])
     if not frames:
@@ -298,7 +318,12 @@ def get_closest_frame(analysis_id: str, time: float = 0.0):
 @app.get("/api/analysis/{analysis_id}/events")
 def get_events(analysis_id: str, up_to_time: Optional[float] = None):
     if analysis_id not in ANALYSIS_STORE:
-        raise HTTPException(status_code=404, detail="Analysis not found")
+        res_path = os.path.join(RESULTS_DIR, f"{analysis_id}.json")
+        if os.path.exists(res_path):
+            with open(res_path, "r") as f:
+                ANALYSIS_STORE[analysis_id] = json.load(f)
+        else:
+            raise HTTPException(status_code=404, detail="Analysis not found")
 
     events = ANALYSIS_STORE[analysis_id].get("events", [])
     if up_to_time is not None:

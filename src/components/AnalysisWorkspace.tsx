@@ -166,7 +166,7 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
 
           <div>
             <span className="text-neutral-400 uppercase">FPS: </span>
-            <span className="font-semibold text-white">29.97</span>
+            <span className="font-semibold text-white">{result.metadata?.fps || 25.0}</span>
           </div>
 
           <div>
@@ -265,6 +265,7 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
               isPlaying={isPlaying}
               onTimeUpdate={setCurrentTime}
               frames={frames}
+              metadata={result.metadata}
               selectedTrackId={selectedTrackId}
               selectedEvent={selectedEvent}
               onSelectTrack={setSelectedTrackId}
@@ -478,7 +479,11 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
             </div>
             <div className="p-3 bg-[#12151D] border border-white/10">
               <span className="text-[10px] text-neutral-400 block uppercase">AVG CONFIDENCE</span>
-              <span className="text-xl font-bold text-emerald-400">93%</span>
+              <span className="text-xl font-bold text-emerald-400">
+                {result.entities.length > 0
+                  ? Math.round((result.entities.reduce((sum, e) => sum + (e.confidence || 0.88), 0) / result.entities.length) * 100)
+                  : 92}%
+              </span>
             </div>
             <div className="p-3 bg-[#12151D] border border-white/10 col-span-2 sm:col-span-1">
               <span className="text-[10px] text-neutral-400 block uppercase">VIDEO PROCESSED</span>
@@ -588,7 +593,7 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
                       : 'text-neutral-400 hover:text-white border border-white/10'
                   }`}
                 >
-                  TRACKED ENTITIES ({result.entities.length || 3})
+                  TRACKED ENTITIES ({result.entities.length})
                 </button>
               </div>
 
@@ -658,7 +663,7 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
               </>
             )}
 
-            {/* TAB 2: PERSISTENT TRACKED ENTITIES (Requirement #10) */}
+            {/* TAB 2: PERSISTENT TRACKED ENTITIES */}
             {rightTab === 'entities' && (
               <div className="space-y-3">
                 <div className="text-xs font-mono text-neutral-400 pb-1">
@@ -668,27 +673,19 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
                 {result.entities.map((ent) => {
                   const isSelected = selectedTrackId === ent.track_id;
 
-                  // Dynamically evaluate current behavior at video timestamp
-                  let dynamicBehavior = "WALKING";
-                  let dynamicStatus = "Active";
-                  let dynamicZone = "Picking Corridor A";
-
-                  if (ent.track_id === 2) {
-                    if (currentTime >= 8.42) {
-                      dynamicBehavior = "RESTRICTED ZONE";
-                      dynamicStatus = "Warning";
-                      dynamicZone = "Zone B (High-Voltage Corridor)";
-                    }
-                  } else if (ent.track_id === 3) {
-                    if (currentTime >= 13.87) {
-                      dynamicBehavior = "FALLEN";
-                      dynamicStatus = "Critical";
-                      dynamicZone = "Zone B (Floor Collapse)";
-                    }
-                  }
+                  // Dynamically evaluate current behavior from active frame tracks
+                  const liveTrack = currentTracks.find(t => t.track_id === ent.track_id);
+                  const isVisible = Boolean(liveTrack);
+                  const dynamicBehavior = liveTrack ? liveTrack.behavior : (ent.current_behavior || "WALKING");
+                  const dynamicStatus: string = liveTrack
+                    ? (liveTrack.behavior === 'FALLEN' ? 'Critical' : (liveTrack.in_restricted_zone || liveTrack.behavior === 'ENTERED RESTRICTED ZONE') ? 'Violation' : liveTrack.behavior === 'STATIONARY' ? 'Stationary' : 'Normal')
+                    : (ent.status || 'Active');
+                  const dynamicZone = liveTrack
+                    ? (liveTrack.in_restricted_zone ? 'Restricted Zone' : 'Standard Area')
+                    : '—';
 
                   const isCritical = dynamicStatus === "Critical";
-                  const isWarning = dynamicStatus === "Warning";
+                  const isWarning = dynamicStatus === "Violation" || dynamicStatus === "Warning" || dynamicStatus === "Stationary";
 
                   return (
                     <div
@@ -707,17 +704,22 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
                           <span className="font-bold text-white text-sm">{ent.id}</span>
-                          <span className="text-[10px] text-neutral-400 uppercase">Worker</span>
+                          <span className="text-[10px] text-neutral-400 uppercase">{ent.role || 'Personnel'}</span>
                         </div>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          isCritical
-                            ? 'bg-red-500 text-white'
-                            : isWarning
-                            ? 'bg-amber-500 text-black'
-                            : 'bg-emerald-500/20 text-emerald-400'
-                        }`}>
-                          {dynamicStatus}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {isVisible && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          )}
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            isCritical
+                              ? 'bg-red-500 text-white'
+                              : isWarning
+                              ? 'bg-amber-500 text-black'
+                              : 'bg-emerald-500/20 text-emerald-400'
+                          }`}>
+                            {isVisible ? dynamicStatus : 'OUT OF FRAME'}
+                          </span>
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-2 text-[11px] text-neutral-400">
@@ -728,16 +730,16 @@ export const AnalysisWorkspace: React.FC<AnalysisWorkspaceProps> = ({
                           </span>
                         </div>
                         <div>
-                          <span className="text-[9px] uppercase text-neutral-500 block">CURRENT ZONE</span>
+                          <span className="text-[9px] uppercase text-neutral-500 block">ZONE STATUS</span>
                           <span className="text-white truncate block">{dynamicZone}</span>
                         </div>
                         <div>
-                          <span className="text-[9px] uppercase text-neutral-500 block">FIRST / LAST SEEN</span>
-                          <span>00:00.00 / 00:{Math.floor(duration).toString().padStart(2, '0')}.50</span>
+                          <span className="text-[9px] uppercase text-neutral-500 block">TIME TRACKED</span>
+                          <span>{ent.tracked_duration_sec ? `${ent.tracked_duration_sec}s` : `${duration.toFixed(1)}s`}</span>
                         </div>
                         <div>
-                          <span className="text-[9px] uppercase text-neutral-500 block">TIME TRACKED</span>
-                          <span className="text-white">{duration.toFixed(1)}s (100%)</span>
+                          <span className="text-[9px] uppercase text-neutral-500 block">CONFIDENCE</span>
+                          <span className="text-white">{Math.round((ent.confidence || 0.9) * 100)}%</span>
                         </div>
                       </div>
                     </div>

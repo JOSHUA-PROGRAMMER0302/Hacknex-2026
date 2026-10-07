@@ -13,7 +13,6 @@ import { IndustryGrid } from './components/IndustryGrid';
 import { DarkCta } from './components/DarkCta';
 import { Footer } from './components/Footer';
 import { DEMO_REFERENCE_ANALYSIS } from './services/demoData';
-import { safeWatchApi } from './services/api';
 import type { VideoAnalysisResult, PipelineConfig } from './types';
 
 export function App() {
@@ -103,22 +102,8 @@ export function App() {
         result={analysisResult || DEMO_REFERENCE_ANALYSIS}
         onReturnToMarketing={navigateToMarketing}
         onUploadNewVideo={() => {
-          // Allow uploading directly from workspace
-          const input = document.createElement('input');
-          input.type = 'file';
-          input.accept = 'video/mp4,video/webm,video/quicktime';
-          input.onchange = async (e) => {
-            const file = (e.target as HTMLInputElement).files?.[0];
-            if (file) {
-              try {
-                const res = await safeWatchApi.analyzeVideo(file, config);
-                setAnalysisResult(res);
-              } catch (err) {
-                console.error("Failed to analyze video:", err);
-              }
-            }
-          };
-          input.click();
+          navigateToMarketing();
+          setTimeout(() => scrollToSection('upload'), 80);
         }}
         config={config}
         onConfigChange={setConfig}
